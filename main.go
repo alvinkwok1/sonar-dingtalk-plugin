@@ -99,6 +99,7 @@ func parseWebhook(s *sonarScanResult, r *http.Request) error {
 	// 解析项目信息
 	s.projectName = getMapValue(sonarRsp["project"], "name")
 	s.projectKey = getMapValue(sonarRsp["project"], "key")
+	s.projectUrl = getMapValue(sonarRsp["project"], "url")
 	// 解析分支信息
 	s.branchName = getMapValue(sonarRsp["branch"], "name")
 	s.branchUrl = getMapValue(sonarRsp["branch"], "url")
@@ -183,57 +184,61 @@ func requestScanResult(s *sonarScanResult) error {
 	return nil
 }
 
-// dingtalkHandler
-func dingtalkHandler(w http.ResponseWriter, r *http.Request) {
-	noticeInfo := &sonarScanResult{}
-	err := parseWebhook(noticeInfo, r)
-	if err != nil {
-		log.Println("解析webhook调用参数异常." + err.Error())
-	}
-	err = requestScanResult(noticeInfo)
-	if err != nil {
-		log.Println("请求sonar异常." + err.Error())
-	}
-	// 成功失败标志
-	var picUrl string
-	if noticeInfo.alterStatus == "OK" {
-		picUrl = "http://s1.ax1x.com/2020/10/29/BGMeTe.png"
+func dingTalkNotice(s *sonarScanResult) error {
+	// 构建钉钉消息
+	var color string
+	if s.alterStatus == "OK" {
+		color = "#008000"
 	} else {
-		picUrl = "http://s1.ax1x.com/2020/10/29/BGMZwD.png"
+		color = "#FF0000"
 	}
-	// 发送钉钉消息
-	msgUrl := fmt.Sprintf("https://oapi.dingtalk.com/robot/send?access_token=%s", noticeInfo.accessToken)
-	var messageUrl string
-	if programCommand.multiBranch {
-		messageUrl = fmt.Sprintf("%s", noticeInfo.branchUrl)
-	} else {
-		messageUrl = fmt.Sprintf("%s/dashboard?id=%s", noticeInfo.serverUrl, noticeInfo.projectKey)
-	}
-
-	link := make(map[string]string)
-	link["title"] = fmt.Sprintf("%s[%s]代码扫描报告", noticeInfo.projectName, noticeInfo.branchName)
-	branchStatus := fmt.Sprintf("Bugs: %s | 漏洞: %s | 异味: %s\r覆盖率: %s%%\r重复率: %s%%\n\n",
-		noticeInfo.bugs, noticeInfo.vulnerabilities, noticeInfo.codeSmells, noticeInfo.coverage, noticeInfo.duplicatedLines)
-	newCodeStatus := fmt.Sprintf("新增Bugs: %s | 新增漏洞: %s | 新增异味: %s\r覆盖率: %s%%\r重复率: %s%%",
-		noticeInfo.new_bugs, noticeInfo.new_vulnerabilities, noticeInfo.new_codeSemlls, noticeInfo.new_coverage, noticeInfo.new_duplicatedLines)
-	link["text"] = branchStatus + newCodeStatus
-	link["messageUrl"] = messageUrl
-	link["picUrl"] = picUrl
-
+	scanResultText := fmt.Sprintf("**扫描结果**: <font color='%s'>%s</font> \n - - - \n\n", color, s.alterStatus)
+	projectInfo := fmt.Sprintf("**项目名称**: [%s](%s)(项目首页) \n\n**项目分支**: [%s](%s)(分支信息) \n- - -\n\n", s.projectName, s.projectUrl, s.branchName, s.branchUrl)
+	newCodeStatus := fmt.Sprintf("**新增Bugs**: %s  |  **新增漏洞**: %s | **新增异味**: %s\n **覆盖率**: %s%% | **重复率**: %s%% \n - - - \n\n",
+		s.new_bugs, s.new_vulnerabilities, s.new_codeSemlls, s.new_coverage, s.new_duplicatedLines)
+	branchStatus := fmt.Sprintf("**Bugs**: %s | **漏洞**: %s | **异味**: %s\n**覆盖率**: %s%% | **重复率**: %s%% \n - - - \n\n",
+		s.bugs, s.vulnerabilities, s.codeSmells, s.coverage, s.duplicatedLines)
+	// 创建钉钉通知请求
+	markdown := make(map[string]string)
+	markdown["text"] = scanResultText + projectInfo + newCodeStatus + branchStatus
+	markdown["title"] = "代码扫描报告"
 	param := make(map[string]interface{})
-	param["msgtype"] = "link"
-	param["link"] = link
+	param["msgtype"] = "markdown"
+	param["markdown"] = markdown
 
-	// send dingtalk message
+	// 发送钉钉消息
 	paramBytes, _ := json.Marshal(param)
+	msgUrl := fmt.Sprintf("https://oapi.dingtalk.com/robot/send?access_token=%s", s.accessToken)
 	dingTalkRsp, _ := http.Post(msgUrl, "application/json", bytes.NewBuffer(paramBytes))
 	dingTalkObj := make(map[string]interface{})
 	json.NewDecoder(dingTalkRsp.Body).Decode(&dingTalkObj)
 	if dingTalkObj["errcode"].(float64) != 0 {
-		fmt.Fprint(w, "消息推送失败，请检查钉钉机器人配置")
-		return
+		return errors.New("请检查钉钉机器人配置")
 	}
-	fmt.Fprint(w, "消息推送成功")
+	return nil
+}
+
+// dingtalkHandler
+func dingtalkHandler(w http.ResponseWriter, r *http.Request) {
+	noticeInfo := &sonarScanResult{}
+	// 解析webhook
+	err := parseWebhook(noticeInfo, r)
+	if err != nil {
+		log.Println("解析webhook调用参数异常." + err.Error())
+	}
+	// 请求并解析webapi结果
+	err = requestScanResult(noticeInfo)
+	if err != nil {
+		log.Println("请求sonar异常." + err.Error())
+	}
+	// 钉钉通知
+	err = dingTalkNotice(noticeInfo)
+	if err != nil {
+		_, _ = fmt.Fprint(w, "消息推送失败: "+err.Error())
+	} else {
+		_, _ = fmt.Fprint(w, "消息推送成功")
+	}
+
 }
 
 func main() {
